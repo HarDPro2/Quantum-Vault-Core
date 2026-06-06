@@ -14,12 +14,15 @@ readme = "README.md"
 [dependencies]
 # ── Cryptography (all from the audited RustCrypto project) ──────────
 aes-gcm = { version = "0.10", features = ["zeroize"] }  # AES-256-GCM authenticated encryption
+chacha20poly1305 = "0.10"                                # XChaCha20Poly1305 authenticated encryption
 argon2 = "0.5"                                           # Argon2id key derivation (PHC winner)
 sha2 = "0.10"                                            # SHA-256 hashing
 rand = "0.8"                                             # Cryptographic RNG (OsRng)
 zeroize = { version = "1", features = ["derive"] }       # Secure memory cleanup
 hex = "0.4"                                              # Hex encoding for key transport
 sharks = "0.5"                                           # Shamir Secret Sharing
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # ── Platform: Memory locking ───────────────────────────────────────
 [target.'cfg(unix)'.dependencies]

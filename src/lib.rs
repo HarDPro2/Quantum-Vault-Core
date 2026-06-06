@@ -27,3 +27,4 @@
 pub mod crypto;
 pub mod cleanup;
 pub mod errors;
+pub mod crypto_erase;
