@@ -3,8 +3,9 @@
 //! Open-source cryptographic engine powering [Quantum Vault](https://quantum-vault-web.vercel.app).
 //!
 //! This crate contains the security-critical modules that handle:
-//! - **AES-256-GCM** encryption/decryption with authenticated encryption
-//! - **Argon2id** key derivation (OWASP high-security parameters)
+//! - **XChaCha20-Poly1305** authenticated encryption for the vault container
+//!   (`crypto_erase`) — the cipher the product actually runs
+//! - **Argon2id** key derivation (OWASP high-security parameters) for the KEK
 //! - **Shamir Secret Sharing** for key recovery
 //! - **Memory locking** (`VirtualLock`/`mlock`) to prevent key paging
 //! - **DOD 5220.22-M** secure file deletion (3-pass overwrite)

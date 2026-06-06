@@ -6,33 +6,7 @@
 // In the full application, these integrate with the vault session manager.
 // This file shows the patterns for educational/audit purposes.
 
-use super::{derive_key_from_password, generate_salt};
 use zeroize::Zeroizing;
-
-/// Derives a key and generates salt — demonstrates Zeroizing wrapper usage.
-///
-/// The `Zeroizing<Vec<u8>>` wrapper guarantees that `_key` is overwritten
-/// with zeros when it goes out of scope, even if an error occurs mid-function.
-///
-/// # Security Properties
-/// - Key material never outlives this function's scope
-/// - On error during derivation, partial key bytes are zeroized (see `derive_key_from_password`)
-/// - No `.clone()` of key material — single owner, single zeroize
-pub fn derive_key_example(password: &str) -> Result<String, String> {
-    let salt = generate_salt();
-    let salt_hex = hex::encode(&salt);
-
-    // Zeroizing<T> implements Drop to call .zeroize() automatically.
-    // This means the derived key is cleaned from RAM even if we return early.
-    let _key = Zeroizing::new(
-        derive_key_from_password(password, &salt)
-            .map_err(|e| format!("Key derivation failed: {}", e))?
-    );
-
-    // _key is auto-zeroized when it goes out of scope here.
-    // No manual .zeroize() call needed — the compiler guarantees cleanup.
-    Ok(salt_hex)
-}
 
 /// Generates Shamir recovery shares from a key.
 ///
