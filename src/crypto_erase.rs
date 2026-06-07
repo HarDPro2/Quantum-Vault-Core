@@ -284,14 +284,6 @@ impl Vault {
         Err(Error::Aead) // Ninguno autenticó
     }
 
-    /// Elimina la entrada del índice y destruye la DEK de un archivo.
-    pub fn crypto_erase_file(&mut self, file_id: &str) {
-        self.index.retain(|e| e.id != file_id);
-        // AUDIT: Para la persistencia atómica de la cabecera, al guardar self.header
-        // tras agregar o eliminar un archivo, se debe escribir a un archivo temporal
-        // y luego hacer un renombrado atómico (fs::rename) sobre el archivo original.
-    }
-
     /// Rota la Master Key (re-keying): genera nueva MK, re-envuelve todas las DEK,
     /// y actualiza el keyslot activo. El slot inactivo NO se modifica.
     ///
@@ -487,11 +479,6 @@ mod tests {
         let dek_unwrapped = unwrap_key(&vault2.master_key, &entry_read.wrapped_dek, entry_read.id.as_bytes()).unwrap();
         let decrypted_data = decrypt_file(&dek_unwrapped, &encrypted_buf, &entry_read.id).unwrap();
         assert_eq!(decrypted_data, original_data);
-
-        // 5. Borrar archivo del índice
-        let mut vault3 = vault2;
-        vault3.crypto_erase_file(file_id);
-        assert_eq!(vault3.index.len(), 0);
 
         // 6. Probar unlock con decoy password
         let (header3, _) = read_header_v2(&container_path).unwrap();
