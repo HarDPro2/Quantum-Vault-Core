@@ -26,6 +26,5 @@
 //! in your application, your entire application must also be AGPL-3.0.
 
 pub mod crypto;
-pub mod cleanup;
 pub mod errors;
 pub mod crypto_erase;

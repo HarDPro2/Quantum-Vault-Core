@@ -26,8 +26,6 @@ Trust is everything for security software. Instead of asking you to trust our ma
 | `crypto/mod.rs` | Shamir Secret Sharing | 47 |
 | `crypto/mem_lock.rs` | `VirtualLock`/`mlock` — keys never touch swap/pagefile | 99 |
 | `crypto/commands.rs` | Zeroize patterns for safe key handling | 74 |
-| `cleanup/mod.rs` | Cleanup utilities (session/temp artifacts) | 233 |
-| `cleanup/commands.rs` | Public cleanup API (`cleanup_traces`) | 16 |
 | `errors.rs` | Panic hook that zeroizes keys before process death | 131 |
 
 The remaining 80% (UI, vault container format, stealth system, licensing) remains closed-source.
@@ -156,13 +154,10 @@ quantum-vault-core/
     ├── lib.rs          # Crate root
     ├── errors.rs       # Panic hook with key zeroization
     ├── crypto_erase.rs # XChaCha20-Poly1305 + Argon2id KEK + Vault/key hierarchy
-    ├── crypto/
-    │   ├── mod.rs      # Shamir Secret Sharing
-    │   ├── mem_lock.rs # VirtualLock/mlock memory protection
-    │   └── commands.rs # Zeroize wrapper patterns
-    └── cleanup/
-        ├── mod.rs      # Cleanup utilities (session/temp artifacts)
-        └── commands.rs # Public API with input validation
+    └── crypto/
+        ├── mod.rs      # Shamir Secret Sharing
+        ├── mem_lock.rs # VirtualLock/mlock memory protection
+        └── commands.rs # Zeroize wrapper patterns
 ```
 
 ---

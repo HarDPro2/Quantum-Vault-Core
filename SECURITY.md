@@ -30,7 +30,6 @@ Instead, report it privately:
 
 This policy covers the code in this repository:
 - `src/crypto/` — Encryption, key derivation, memory locking
-- `src/cleanup/` — Secure file deletion
 - `src/errors.rs` — Panic handling with key zeroization
 
 ## Out of Scope
