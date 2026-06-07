@@ -3,11 +3,11 @@ name = "quantum-vault-core"
 version = "0.1.0"
 edition = "2021"
 authors = ["Quantum Vault Team"]
-description = "Open-source cryptographic core of Quantum Vault — AES-256-GCM, Argon2id, memory locking, and DOD 5220.22-M secure deletion"
+description = "Open-source cryptographic core of Quantum Vault — XChaCha20-Poly1305, Argon2id key derivation, Shamir secret sharing, memory locking, and key zeroization"
 license = "AGPL-3.0-only"
 repository = "https://github.com/HarDPro2/Quantum-Vault-Core"
 homepage = "https://quantum-vault-web.vercel.app"
-keywords = ["encryption", "aes-256", "argon2", "security", "zeroize"]
+keywords = ["encryption", "xchacha20", "argon2", "security", "zeroize"]
 categories = ["cryptography", "os"]
 readme = "README.md"
 

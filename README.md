@@ -1,6 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
-  <img src="https://img.shields.io/badge/AES--256--GCM-00897B?style=for-the-badge&logo=letsencrypt&logoColor=white" alt="AES-256-GCM">
+  <img src="https://img.shields.io/badge/XChaCha20--Poly1305-00897B?style=for-the-badge&logo=letsencrypt&logoColor=white" alt="XChaCha20-Poly1305">
   <img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg?style=for-the-badge" alt="AGPL-3.0">
   <img src="https://img.shields.io/badge/Zero%20Custom%20Crypto-✓-brightgreen?style=for-the-badge" alt="No custom crypto">
 </p>
@@ -9,7 +9,7 @@
 
 <p align="center">
   <strong>Open-source cryptographic engine powering <a href="https://quantum-vault-web.vercel.app">Quantum Vault</a></strong><br>
-  <em>AES-256-GCM · Argon2id · Memory Locking · DOD 5220.22-M Secure Delete</em>
+  <em>XChaCha20-Poly1305 · Argon2id · Memory Locking · Crypto-Erase Secure Delete</em>
 </p>
 
 ---
@@ -22,12 +22,13 @@ Trust is everything for security software. Instead of asking you to trust our ma
 
 | Module | What It Does | Lines |
 |--------|-------------|-------|
-| `crypto/mod.rs` | AES-256-GCM encryption + Argon2id key derivation + Shamir SSS | 129 |
-| `crypto/mem_lock.rs` | `VirtualLock`/`mlock` — keys never touch swap/pagefile | 100 |
-| `crypto/commands.rs` | Zeroize patterns for safe key handling | 95 |
-| `cleanup/mod.rs` | DOD 5220.22-M secure delete (3-pass overwrite) | 383 |
-| `cleanup/commands.rs` | Safe public API for secure file deletion | 56 |
-| `errors.rs` | Panic hook that zeroizes keys before process death | 115 |
+| `crypto_erase.rs` | XChaCha20-Poly1305 + Argon2id KEK + Vault/key hierarchy | 618 |
+| `crypto/mod.rs` | Shamir Secret Sharing | 47 |
+| `crypto/mem_lock.rs` | `VirtualLock`/`mlock` — keys never touch swap/pagefile | 99 |
+| `crypto/commands.rs` | Zeroize patterns for safe key handling | 74 |
+| `cleanup/mod.rs` | Cleanup utilities (session/temp artifacts) | 233 |
+| `cleanup/commands.rs` | Public cleanup API (`cleanup_traces`) | 16 |
+| `errors.rs` | Panic hook that zeroizes keys before process death | 131 |
 
 The remaining 80% (UI, vault container format, stealth system, licensing) remains closed-source.
 
@@ -35,19 +36,18 @@ The remaining 80% (UI, vault container format, stealth system, licensing) remain
 
 ## Security Architecture
 
-### 🔑 Encryption: AES-256-GCM
+### 🔑 Encryption: XChaCha20-Poly1305
 
 ```
-Password → Argon2id(64MB, 3 iterations, 4 parallelism) → 256-bit Key → AES-256-GCM
+Password → Argon2id → 256-bit Key (KEK) → XChaCha20-Poly1305
 ```
 
-- **Algorithm:** AES-256-GCM (authenticated encryption with associated data)
-- **Key Derivation:** Argon2id with OWASP high-security parameters
-  - Memory: 64 MB (resists GPU attacks)
-  - Time cost: 3 iterations (~500ms on modern hardware)
-  - Parallelism: 4 threads
-- **Nonce:** 12 bytes from OS cryptographic RNG (`OsRng`)
-- **Format:** `[nonce (12B) | ciphertext | GCM tag (16B)]`
+- **Algorithm:** XChaCha20-Poly1305 (authenticated encryption with associated data)
+- **Key derivation:** Argon2id. The memory, iteration and parallelism parameters are
+  supplied per vault and validated by the core against safe bounds:
+  memory 4–512 MiB, iterations 1–64, parallelism 1–16.
+- **Nonce:** 24 bytes from OS cryptographic RNG (`OsRng`)
+- **Format:** `[nonce (24B) | ciphertext | Poly1305 tag (16B)]`
 
 ### 🧠 Memory Protection
 
@@ -60,19 +60,24 @@ Key derived → VirtualLock(key) → Use key → Zeroize(key) → VirtualUnlock(
 - **On panic:** Global hook calls `unlock → zeroize → reset` before process death
 - **On drop:** `Zeroizing<Vec<u8>>` wrapper guarantees zeroing even on error paths
 
-### 🗑️ Secure Deletion: DOD 5220.22-M
+### 🗑️ Secure Deletion: Crypto-Erase (Key Destruction)
 
-```
-Pass 1: Write 0x00 to entire file → fsync
-Pass 2: Write 0xFF to entire file → fsync
-Pass 3: Write crypto random bytes → fsync
-Final: Delete file entry from directory
-```
+Quantum Vault does not overwrite file bytes — overwriting is ineffective on modern
+SSDs and copy-on-write filesystems. Instead it uses **crypto-erase**:
 
-**Honest limitations (we declare these upfront):**
-- ⚠️ SSDs with wear-levelling/TRIM may remap physical blocks
-- ⚠️ Copy-on-write filesystems (ReFS, Btrfs, APFS) may write to new blocks
-- ⚠️ For serious forensic threats, combine with full-disk encryption
+- Every file is encrypted under its own random per-file key (DEK).
+- That DEK exists only wrapped under the master key, inside the encrypted index.
+- Deleting a file removes its wrapped DEK from the index and atomically rewrites
+  the container (temp → fsync → rename).
+- With the wrapped DEK gone from the persisted index, the file's ciphertext is left
+  under a key that no longer exists → mathematically unrecoverable.
+
+(The file-level delete is orchestrated by the vault/app layer using this key hierarchy.)
+
+**Honest limitations:**
+- Traces of the old wrapped key may survive in unallocated SSD cells. They are useless
+  without your master password; rotating the master key renders even those undecryptable.
+- The container is not compacted: deleted blocks remain as unreadable random noise.
 
 ### 🔀 Key Recovery: Shamir Secret Sharing
 
@@ -95,7 +100,7 @@ Every cryptographic dependency comes from the [RustCrypto](https://github.com/Ru
 
 | Crate | Version | Purpose | Project |
 |-------|---------|---------|---------|
-| `aes-gcm` | 0.10 | AES-256-GCM authenticated encryption | RustCrypto |
+| `chacha20poly1305` | 0.10 | XChaCha20-Poly1305 authenticated encryption | RustCrypto |
 | `argon2` | 0.5 | Argon2id key derivation | RustCrypto |
 | `zeroize` | 1.0 | Secure memory zeroing | RustCrypto |
 | `sha2` | 0.10 | SHA-256 hashing | RustCrypto |
@@ -150,12 +155,13 @@ quantum-vault-core/
 └── src/
     ├── lib.rs          # Crate root
     ├── errors.rs       # Panic hook with key zeroization
+    ├── crypto_erase.rs # XChaCha20-Poly1305 + Argon2id KEK + Vault/key hierarchy
     ├── crypto/
-    │   ├── mod.rs      # AES-256-GCM + Argon2id + Shamir SSS
+    │   ├── mod.rs      # Shamir Secret Sharing
     │   ├── mem_lock.rs # VirtualLock/mlock memory protection
     │   └── commands.rs # Zeroize wrapper patterns
     └── cleanup/
-        ├── mod.rs      # DOD 5220.22-M secure file deletion
+        ├── mod.rs      # Cleanup utilities (session/temp artifacts)
         └── commands.rs # Public API with input validation
 ```
 
