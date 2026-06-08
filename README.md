@@ -26,7 +26,7 @@ Trust is everything for security software. Instead of asking you to trust our ma
 | `crypto/mod.rs` | Shamir Secret Sharing | 47 |
 | `crypto/mem_lock.rs` | `VirtualLock`/`mlock` — keys never touch swap/pagefile | 99 |
 | `crypto/commands.rs` | Zeroize patterns for safe key handling | 74 |
-| `errors.rs` | Panic hook that zeroizes keys before process death | 131 |
+| `errors.rs` | Reference panic-hook pattern (production hook lives in the app) | 139 |
 
 The remaining 80% (UI, vault container format, stealth system, licensing) remains closed-source.
 
@@ -152,7 +152,7 @@ quantum-vault-core/
 ├── SECURITY.md         # Vulnerability disclosure policy
 └── src/
     ├── lib.rs          # Crate root
-    ├── errors.rs       # Panic hook with key zeroization
+    ├── errors.rs       # Reference panic-hook pattern (prod hook in app)
     ├── crypto_erase.rs # XChaCha20-Poly1305 + Argon2id KEK + Vault/key hierarchy
     └── crypto/
         ├── mod.rs      # Shamir Secret Sharing
@@ -173,7 +173,7 @@ Features in the full app (closed-source):
 - 📺 In-memory media playback (photos/videos never touch disk)
 - 🚪 Multiple unlock methods (hotkey, USB key, time-based)
 - 🔄 Local WiFi sync between devices
-- 💀 Panic button (instant lock + hide + trace cleanup)
+- 💀 Panic button (instant lock + hide)
 
 **Download:** [quantum-vault-web.vercel.app](https://quantum-vault-web.vercel.app)
 

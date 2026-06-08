@@ -9,7 +9,7 @@
 //! - **Shamir Secret Sharing** for key recovery
 //! - **Memory locking** (`VirtualLock`/`mlock`) to prevent key paging
 //! - **Crypto-erase** secure file deletion (key destruction, not overwrite)
-//! - **Panic-safe key zeroization** for defense-in-depth
+//! - **Panic-hook pattern** for key zeroization (reference; production hook in the app)
 //!
 //! ## Design Philosophy
 //!
