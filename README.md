@@ -24,7 +24,7 @@ Trust is everything for security software. Instead of asking you to trust our ma
 |--------|-------------|-------|
 | `crypto_erase.rs` | XChaCha20-Poly1305 + Argon2id KEK + Vault/key hierarchy | 618 |
 | `crypto/mod.rs` | Shamir Secret Sharing | 47 |
-| `crypto/mem_lock.rs` | `VirtualLock`/`mlock` — keys never touch swap/pagefile | 99 |
+| `crypto/mem_lock.rs` | `VirtualLock`/`mlock` — best-effort lock to keep keys out of swap (continues with a warning if the OS denies it) | 99 |
 | `crypto/commands.rs` | Zeroize patterns for safe key handling | 74 |
 | `errors.rs` | Reference panic-hook pattern (production hook lives in the app) | 139 |
 
@@ -53,8 +53,11 @@ Password → Argon2id → 256-bit Key (KEK) → XChaCha20-Poly1305
 Key derived → VirtualLock(key) → Use key → Zeroize(key) → VirtualUnlock(key)
 ```
 
-- **Windows:** `VirtualLock` prevents the OS from paging key memory to `pagefile.sys`
-- **Linux:** `mlock` prevents paging to swap
+- **Windows:** `VirtualLock` asks the OS to keep key memory out of `pagefile.sys`
+- **Linux:** `mlock` asks the OS to keep key pages out of swap
+- **Best-effort:** the lock is requested for every key, but if the OS denies it
+  (e.g. `ulimit -l` too low), the app logs a warning and continues — the key stays
+  functional, so swap avoidance is not guaranteed in that case
 - **On panic:** Global hook calls `unlock → zeroize → reset` before process death
 - **On drop:** `Zeroizing<Vec<u8>>` wrapper guarantees zeroing even on error paths
 
@@ -170,7 +173,7 @@ Features in the full app (closed-source):
 - 🔒 Hardware-locked containers (useless on another device)
 - 👻 Ghost mode (app vanishes from taskbar)
 - 🎭 Window disguise (looks like Windows Update, etc.)
-- 📺 In-memory media playback (photos/videos never touch disk)
+- 📺 In-memory media playback (played from RAM; no decrypted file written to disk)
 - 🚪 Multiple unlock methods (hotkey, USB key, time-based)
 - 🔄 Local WiFi sync between devices
 - 💀 Panic button (instant lock + hide)
