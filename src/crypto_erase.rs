@@ -97,6 +97,47 @@ pub struct VaultEntry {
     pub wrapped_dek: WrappedKey, // DEK cifrada bajo la MK
 }
 
+/// Índice serializado dentro de `encrypted_indices[slot]`, cifrado bajo la MK de ese slot.
+///
+/// Envuelve la lista de archivos con `has_decoy`: el registro AUTORITATIVO de si el
+/// contenedor tiene un keyslot decoy real en el slot 1. Vive solo en el índice REAL
+/// (`encrypted_indices[0]`, legible únicamente con el password real); el índice decoy
+/// siempre lleva `has_decoy=false` (historia de cobertura: el decoy parece una bóveda
+/// normal sin señuelo). El Header va en claro, por eso este registro NO puede ir ahí.
+///
+/// La migración de decoy ([`Vault::add_decoy`]) lo consulta para no sobrescribir un
+/// decoy ya existente (lo que huérfanaría sus bloques en la región compartida).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct IndexFile {
+    #[serde(default)]
+    pub has_decoy: bool,
+    pub entries: Vec<VaultEntry>,
+}
+
+/// Variante por referencia para serializar sin clonar el índice.
+#[derive(serde::Serialize)]
+struct IndexFileRef<'a> {
+    has_decoy: bool,
+    entries: &'a [VaultEntry],
+}
+
+/// Serializa el índice al formato `IndexFile` (entries + registro `has_decoy`).
+pub fn serialize_index(entries: &[VaultEntry], has_decoy: bool) -> Result<Vec<u8>, Error> {
+    serde_json::to_vec(&IndexFileRef { has_decoy, entries }).map_err(|_| Error::Aead)
+}
+
+/// Deserializa el índice con tolerancia al formato legacy (array desnudo de `VaultEntry`).
+/// Devuelve `(entries, has_decoy)`. El formato legacy asume `has_decoy=false`.
+/// (Pre-lanzamiento el legacy solo existe en bóvedas de prueba, pero la tolerancia es barata.)
+pub fn parse_index(bytes: &[u8]) -> Result<(Vec<VaultEntry>, bool), Error> {
+    if let Ok(idx) = serde_json::from_slice::<IndexFile>(bytes) {
+        return Ok((idx.entries, idx.has_decoy));
+    }
+    // Fallback: un array JSON desnudo no encaja en IndexFile (objeto) → formato legacy.
+    let entries = serde_json::from_slice::<Vec<VaultEntry>>(bytes).map_err(|_| Error::Aead)?;
+    Ok((entries, false))
+}
+
 /// Cabecera persistente de la bóveda (se serializa como JSON y se guarda al inicio del contenedor).
 ///
 /// LIMITACIÓN DE SEGURIDAD — Denegación Plausible:
@@ -242,6 +283,9 @@ pub struct Vault {
     pub master_key: Key,       // MK en memoria (Zeroizing)
     pub index: Vec<VaultEntry>, // índice descifrado
     pub active_slot: usize,    // 0 = real, 1 = decoy
+    /// Registro `has_decoy` del índice que abrió. Autoritativo solo en sesión real
+    /// (`active_slot==0`); en sesión decoy siempre es `false` (cobertura).
+    pub has_decoy: bool,
 }
 
 impl Vault {
@@ -268,12 +312,13 @@ impl Vault {
                 // Descifrar el correspondiente índice
                 if let Some(enc_idx) = header.encrypted_indices.get(i) {
                     if let Ok(index_bytes) = decrypt_index(&master_key, enc_idx) {
-                        if let Ok(index) = serde_json::from_slice(&index_bytes) {
+                        if let Ok((index, has_decoy)) = parse_index(&index_bytes) {
                             return Ok(Self {
                                 header,
                                 master_key,
                                 index,
                                 active_slot: i,
+                                has_decoy,
                             });
                         }
                     }
@@ -317,9 +362,8 @@ impl Vault {
         );
         let wrapped_mk = wrap_key(&kek, &new_mk, &aad)?;
 
-        // Re-cifrar índice con la nueva MK
-        let index_bytes = serde_json::to_vec(&self.index)
-            .map_err(|_| Error::Aead)?;
+        // Re-cifrar índice con la nueva MK (preservar el registro has_decoy del slot activo)
+        let index_bytes = serialize_index(&self.index, self.has_decoy)?;
         let encrypted_index = encrypt_index(&new_mk, &index_bytes)?;
 
         // Actualizar header — solo el slot activo
@@ -328,6 +372,63 @@ impl Vault {
 
         // Actualizar MK en memoria
         self.master_key = new_mk;
+
+        Ok(())
+    }
+
+    /// Añade un keyslot decoy a una bóveda abierta como REAL, convirtiendo el relleno
+    /// aleatorio del slot 1 en un decoy real, vacío y usable.
+    ///
+    /// Reusa el salt y los parámetros KDF EXISTENTES (el slot 0 depende de ellos), con la
+    /// misma derivación/wrap/tamaños que la creación de un decoy de origen → el resultado es
+    /// byte-indistinguible de un decoy nacido con el contenedor (y del relleno previo).
+    ///
+    /// Muta `self.header` (keyslots[1], encrypted_indices[1] y el índice real re-cifrado con
+    /// `has_decoy=true`) y `self.has_decoy`. NO persiste: el llamador es responsable de la
+    /// escritura atómica verificada y del rollback en memoria si la escritura falla (R2).
+    /// `self.master_key` y `self.index` NO cambian, así que el rollback se reduce a restaurar
+    /// `header` y `has_decoy`.
+    pub fn add_decoy(&mut self, decoy_password: &[u8]) -> Result<(), Error> {
+        // Solo desde la bóveda real, y nunca sobrescribir un decoy existente
+        // (huérfanaría sus bloques en la región compartida → pérdida de datos decoy).
+        if self.active_slot != 0 || self.has_decoy {
+            return Err(Error::Aead);
+        }
+        if self.header.keyslots.len() < 2 || self.header.encrypted_indices.len() < 2 {
+            return Err(Error::Aead);
+        }
+
+        // KEK decoy con el salt/params EXISTENTES; AAD idéntico al de creación.
+        let decoy_kek = derive_kek(
+            decoy_password, &self.header.salt,
+            self.header.m_cost, self.header.t_cost, self.header.p_cost,
+        )?;
+        let aad = mk_wrap_aad(
+            &self.header.salt, self.header.m_cost, self.header.t_cost, self.header.p_cost,
+        );
+
+        // MK decoy + wrap (mismo formato que create) → keyslots[1].
+        let decoy_mk = Key::random();
+        let decoy_wrapped = wrap_key(&decoy_kek, &decoy_mk, &aad)?;
+
+        // Índice decoy vacío con has_decoy=false (cobertura: parece bóveda normal sin señuelo).
+        let decoy_index_bytes = serialize_index(&[], false)?;
+        let decoy_encrypted = encrypt_index(&decoy_mk, &decoy_index_bytes)?;
+
+        // Marcar has_decoy=true en el índice real y re-cifrarlo bajo la MK real existente.
+        let real_index_bytes = serialize_index(&self.index, true)?;
+        let real_encrypted = encrypt_index(&self.master_key, &real_index_bytes)?;
+
+        // Aplicar mutaciones (la persistencia verificada + rollback la hace el llamador).
+        self.header.keyslots[1] = decoy_wrapped;
+        self.header.encrypted_indices[1] = decoy_encrypted;
+        self.header.encrypted_indices[0] = real_encrypted;
+        self.has_decoy = true;
+
+        // R1: borrar material secreto en cuanto deja de usarse. `Key` envuelve `Zeroizing`,
+        // así que el drop sobrescribe con ceros; lo forzamos para no dejar copias vivas de más.
+        drop(decoy_kek);
+        drop(decoy_mk);
 
         Ok(())
     }
@@ -353,16 +454,17 @@ mod tests {
         let aad = mk_wrap_aad(&salt, m_cost, t_cost, p_cost);
         let wrapped_mk = wrap_key(&kek, &real_mk, &aad).unwrap();
 
-        // Index real vacío
-        let empty_index: Vec<VaultEntry> = Vec::new();
-        let index_bytes = serde_json::to_vec(&empty_index).unwrap();
-        let encrypted_index = encrypt_index(&real_mk, &index_bytes).unwrap();
+        // Index real vacío (registra has_decoy autoritativamente, como create_new_container)
+        let real_index_bytes = serialize_index(&[], decoy_pwd.is_some()).unwrap();
+        let encrypted_index = encrypt_index(&real_mk, &real_index_bytes).unwrap();
 
         let (keyslots, encrypted_indices) = if let Some(dp) = decoy_pwd {
             let decoy_kek = derive_kek(dp, &salt, m_cost, t_cost, p_cost).unwrap();
             let decoy_mk = Key::random();
             let decoy_wrapped = wrap_key(&decoy_kek, &decoy_mk, &aad).unwrap();
-            let decoy_encrypted = encrypt_index(&decoy_mk, &index_bytes).unwrap();
+            // Índice decoy con has_decoy=false (cobertura)
+            let decoy_index_bytes = serialize_index(&[], false).unwrap();
+            let decoy_encrypted = encrypt_index(&decoy_mk, &decoy_index_bytes).unwrap();
             (vec![wrapped_mk, decoy_wrapped], vec![encrypted_index, decoy_encrypted])
         } else {
             let mut random_nonce = [0u8; NONCE_LEN];
@@ -614,5 +716,166 @@ mod tests {
         assert_eq!(decrypted4, original_data);
 
         let _ = std::fs::remove_file(&container_path);
+    }
+
+    #[test]
+    fn test_index_parse_tolerant_legacy_and_new() {
+        // Formato legacy = array desnudo de VaultEntry → has_decoy=false
+        let legacy: Vec<VaultEntry> = Vec::new();
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        let (entries, has_decoy) = parse_index(&legacy_bytes).unwrap();
+        assert!(entries.is_empty());
+        assert!(!has_decoy, "legacy implica has_decoy=false");
+
+        // Formato nuevo con has_decoy=true round-trip
+        let new_bytes = serialize_index(&[], true).unwrap();
+        let (entries2, has_decoy2) = parse_index(&new_bytes).unwrap();
+        assert!(entries2.is_empty());
+        assert!(has_decoy2);
+    }
+
+    #[test]
+    fn test_add_decoy_migration() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(format!("migrate_{}.qv", rand::random::<u64>()));
+        let real_pwd = b"real_migrate_pwd";
+        let decoy_pwd = b"decoy_migrate_pwd";
+
+        // Crear SIN decoy → slot 1 = relleno
+        create_test_container(&path, real_pwd, None);
+        let (header, _) = read_header_v2(&path).unwrap();
+        let mut vault = Vault::unlock(header, real_pwd).unwrap();
+        assert_eq!(vault.active_slot, 0);
+        assert!(!vault.has_decoy, "contenedor sin decoy");
+
+        // El password decoy NO abre todavía (relleno)
+        let (h_pre, _) = read_header_v2(&path).unwrap();
+        assert!(Vault::unlock(h_pre, decoy_pwd).is_err());
+
+        // Migrar
+        vault.add_decoy(decoy_pwd).unwrap();
+        assert!(vault.has_decoy);
+
+        // Real reabre con has_decoy=true (índice intacto)
+        let real_again = Vault::unlock(vault.header.clone(), real_pwd).unwrap();
+        assert_eq!(real_again.active_slot, 0);
+        assert!(real_again.has_decoy);
+        assert_eq!(real_again.index.len(), 0);
+
+        // Decoy ahora abre: slot 1, índice vacío, has_decoy=false (cobertura)
+        let decoy = Vault::unlock(vault.header.clone(), decoy_pwd).unwrap();
+        assert_eq!(decoy.active_slot, 1);
+        assert!(decoy.index.is_empty());
+        assert!(!decoy.has_decoy);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_add_decoy_rejects_when_decoy_exists() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(format!("reject_{}.qv", rand::random::<u64>()));
+
+        // Crear CON decoy de origen → índice real lleva has_decoy=true
+        create_test_container(&path, b"real_pwd", Some(b"decoy_pwd"));
+        let (header, _) = read_header_v2(&path).unwrap();
+        let mut vault = Vault::unlock(header, b"real_pwd").unwrap();
+        assert!(vault.has_decoy, "decoy de origen ⇒ has_decoy=true");
+
+        // add_decoy debe rechazar (no sobrescribir el decoy existente)
+        assert!(vault.add_decoy(b"otro_decoy").is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_add_decoy_rejects_from_decoy_session() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(format!("reject2_{}.qv", rand::random::<u64>()));
+        create_test_container(&path, b"real_pwd", Some(b"decoy_pwd"));
+
+        // Abrir como DECOY (active_slot==1) → add_decoy debe rechazar
+        let (header, _) = read_header_v2(&path).unwrap();
+        let mut decoy_vault = Vault::unlock(header, b"decoy_pwd").unwrap();
+        assert_eq!(decoy_vault.active_slot, 1);
+        assert!(decoy_vault.add_decoy(b"nuevo").is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_migrated_decoy_indistinguishable_from_origin() {
+        let temp_dir = std::env::temp_dir();
+
+        // Decoy de origen
+        let p_origin = temp_dir.join(format!("orig_{}.qv", rand::random::<u64>()));
+        create_test_container(&p_origin, b"real", Some(b"decoy"));
+        let (h_origin, _) = read_header_v2(&p_origin).unwrap();
+
+        // Decoy migrado: crear sin decoy, leer relleno, luego migrar
+        let p_migr = temp_dir.join(format!("migr_{}.qv", rand::random::<u64>()));
+        create_test_container(&p_migr, b"real", None);
+        let (h_fill, _) = read_header_v2(&p_migr).unwrap(); // relleno aleatorio en slot 1
+        let mut v = Vault::unlock(h_fill.clone(), b"real").unwrap();
+        v.add_decoy(b"decoy").unwrap();
+
+        // keyslots[1].ct y encrypted_indices[1] del decoy migrado deben coincidir en tamaño
+        // tanto con el relleno previo como con un decoy de origen.
+        assert_eq!(v.header.keyslots[1].ct.len(), h_fill.keyslots[1].ct.len(),
+            "ct del decoy migrado vs relleno previo");
+        assert_eq!(v.header.keyslots[1].ct.len(), h_origin.keyslots[1].ct.len(),
+            "ct del decoy migrado vs decoy de origen");
+        assert_eq!(v.header.keyslots[1].nonce.len(), h_origin.keyslots[1].nonce.len());
+        assert_eq!(v.header.encrypted_indices[1].len(), h_fill.encrypted_indices[1].len(),
+            "índice decoy migrado vs relleno previo");
+        assert_eq!(v.header.encrypted_indices[1].len(), h_origin.encrypted_indices[1].len(),
+            "índice decoy migrado vs decoy de origen");
+
+        let _ = std::fs::remove_file(&p_origin);
+        let _ = std::fs::remove_file(&p_migr);
+    }
+
+    /// LINCHPIN (rotate) — el único escritor de slot 0 cuya preservación de has_decoy
+    /// estaba confirmada solo en estático (core:366). Si rotate re-serializara el índice
+    /// sin el flag (to_vec desnudo, como antes de C), tras rotar la bóveda real perdería
+    /// has_decoy y un segundo add_decoy sobrescribiría el decoy → pérdida de datos decoy.
+    #[test]
+    fn test_rotate_after_migrate_preserves_has_decoy() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(format!("rotate_mig_{}.qv", rand::random::<u64>()));
+        let real_pwd = b"rotate_real_pwd";
+        let decoy_pwd = b"rotate_decoy_pwd";
+
+        // Crear SIN decoy → migrar en memoria.
+        create_test_container(&path, real_pwd, None);
+        let (header, _) = read_header_v2(&path).unwrap();
+        let mut vault = Vault::unlock(header, real_pwd).unwrap();
+        assert_eq!(vault.active_slot, 0);
+        assert!(!vault.has_decoy);
+        vault.add_decoy(decoy_pwd).unwrap();
+        assert!(vault.has_decoy);
+
+        // Rotar la master key de la sesión REAL (re-cifra encrypted_indices[0]).
+        vault.rotate_master_key(real_pwd).unwrap();
+        assert!(vault.has_decoy, "rotate no debe borrar has_decoy en memoria");
+
+        // Real reabre bajo el password real (KDF con salt existente) → has_decoy SIGUE true.
+        let real_again = Vault::unlock(vault.header.clone(), real_pwd).unwrap();
+        assert_eq!(real_again.active_slot, 0);
+        assert!(real_again.has_decoy, "REGRESIÓN: rotate borró has_decoy en el índice del slot 0");
+
+        // La prueba conductual directa: un segundo add_decoy DEBE seguir rechazando.
+        let mut real_again = real_again;
+        assert!(
+            real_again.add_decoy(decoy_pwd).is_err(),
+            "add_decoy debe rechazar tras rotate (el decoy sigue existiendo)"
+        );
+
+        // El decoy sigue abrible (rotate no toca keyslots[1]): slot 1, índice vacío.
+        let decoy = Vault::unlock(vault.header.clone(), decoy_pwd).unwrap();
+        assert_eq!(decoy.active_slot, 1);
+        assert!(decoy.index.is_empty());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
