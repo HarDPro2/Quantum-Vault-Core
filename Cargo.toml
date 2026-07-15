@@ -23,6 +23,11 @@ sharks = "0.5"                                           # Shamir Secret Sharing
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# ── Logging & error handling (cross-platform — deben ir en [dependencies],
+#    NO después de un [target.*], o quedarían gateados a esa plataforma) ──
+tracing = "0.1"                                          # Structured logging
+anyhow = "1"                                             # Ergonomic error propagation
+
 # ── Platform: Memory locking ───────────────────────────────────────
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"                                             # mlock/munlock
@@ -31,12 +36,6 @@ libc = "0.2"                                             # mlock/munlock
 windows = { version = "0.58", features = [
     "Win32_System_Memory",                               # VirtualLock/VirtualUnlock
 ] }
-
-# ── Logging ─────────────────────────────────────────────────────────
-tracing = "0.1"                                          # Structured logging
-
-# ── Error handling ──────────────────────────────────────────────────
-anyhow = "1"                                             # Ergonomic error propagation
 
 [profile.release]
 panic = "abort"       # No unwinding → smaller attack surface
